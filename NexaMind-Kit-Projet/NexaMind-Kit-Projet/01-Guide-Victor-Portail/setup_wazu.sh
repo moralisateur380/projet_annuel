@@ -2,7 +2,7 @@
 
 # ==============================================================================
 # SCRIPT D'AUTOMATISATION POUR SRV-WAZUH-1 (SOC Wazuh)
-# Mis à jour avec les IP réelles du projet NexaMind
+# Version auto-correctrice pour les dépôts Debian
 # À exécuter en tant que ROOT sur la Debian Wazuh
 # ==============================================================================
 
@@ -10,31 +10,36 @@ BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-echo -e "${BLUE}==== [1/5] Configuration initiale de l'identité (Clavier, Hostname, ID) ] ====${NC}"
-# Passage du clavier en français
-loadkeys fr
+echo -e "${BLUE}==== [1/6] Réparation des dépôts internet (sources.list) ] ====${NC}"
+# Configuration forcée des dépôts officiels Debian Bookworm
+cat << 'EOF' > /etc/apt/sources.list
+deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
 
-# Régénération de l'identité unique du clone
+deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+deb-src http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+
+deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+deb-src http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
+EOF
+
+echo -e "${BLUE}==== [2/6] Configuration initiale de l'identité (Clavier, Hostname, ID) ] ====${NC}"
+loadkeys fr
 systemd-machine-id-setup
 dpkg-reconfigure openssh-server
-
-# Configuration du nom de domaine local
 hostnamectl set-hostname srv-wazuh-1
 
-echo -e "${BLUE}==== [2/5] Préparation du système et dépendances ] ====${NC}"
-apt update && apt upgrade -y
-apt install -y curl python3 python3-pip python3-requests
+echo -e "${BLUE}==== [3/6] Préparation du système et dépendances nécessaires ] ====${NC}"
+apt update --fix-missing
+apt install -y software-properties-common gnupg apt-transport-https curl python3 python3-pip python3-requests git
 
-echo -e "${BLUE}==== [3/5] Lancement de l'installation automatique de Wazuh (4.9) ] ====${NC}"
+echo -e "${BLUE}==== [4/6] Lancement de l'installation automatique de Wazuh (4.9) ] ====${NC}"
 echo -e "${BLUE}⚠️  Cette étape prend 15 à 20 minutes. Ne coupe pas le terminal !${NC}"
 cd /root
 curl -sO https://packages.wazuh.com/4.9/wazuh-install.sh
-
-# Lancement du script officiel d'installation complète
 bash ./wazuh-install.sh -a
 
-echo -e "${BLUE}==== [4/5] Configuration de l'intégration vers le Portail NexaMind ] ====${NC}"
-# Création du script Python lié à l'IP réelle du serveur Web (192.168.20.20)
+echo -e "${BLUE}==== [5/6] Configuration de l'intégration vers le Portail NexaMind ] ====${NC}"
 cat << 'EOF' > /var/ossec/integrations/custom-nexamind.py
 #!/usr/bin/env python3
 import sys
@@ -60,19 +65,17 @@ payload = {
     "description": alert.get("rule", {}).get("description", "Alerte détectée par le SOC"),
 }
 
-# Envoi automatique ciblé vers ton srv-web-1
 try:
     requests.post("http://192.168.20.20/api/alerte", json=payload, timeout=5)
 except Exception as e:
     pass
 EOF
 
-# Droits de sécurité stricts pour l'intégration
 chmod +x /var/ossec/integrations/custom-nexamind.py
 chmod 750 /var/ossec/integrations/custom-nexamind.py
 chown root:wazuh /var/ossec/integrations/custom-nexamind.py
 
-echo -e "${BLUE}==== [5/5] Activation de l'intégration dans ossec.conf ] ====${NC}"
+echo -e "${BLUE}==== [6/6] Activation de l'intégration dans ossec.conf ] ====${NC}"
 cat << 'EOF' > /tmp/integration_block.xml
   <integration>
     <name>custom-nexamind.py</name>
@@ -82,12 +85,10 @@ cat << 'EOF' > /tmp/integration_block.xml
 </ossec_config>
 EOF
 
-# Injection du bloc XML dans le fichier principal
 sed -i 's/<\/ossec_config>/ /' /var/ossec/etc/ossec.conf
 cat /tmp/integration_block.xml >> /var/ossec/etc/ossec.conf
 rm -f /tmp/integration_block.xml
 
-# Redémarrage du manager pour appliquer les modifications
 systemctl restart wazuh-manager
 
 echo -e "${GREEN}========================================================================${NC}"
