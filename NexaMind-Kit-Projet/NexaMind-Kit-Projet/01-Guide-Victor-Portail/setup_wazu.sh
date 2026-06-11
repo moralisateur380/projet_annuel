@@ -1,166 +1,124 @@
 #!/bin/bash
 # ==============================================================================
-# INSTALLATION WAZUH — srv-wazuh-1 (corrigé)
-# Gère le conflit Python 3.13 / dépendances Wazuh
-# À exécuter en ROOT sur la VM srv-wazuh-1 (PAS sur le template !)
+# INSTALLATION WAZUH VIA DOCKER — srv-wazuh-1
+# Méthode officielle, indépendante de la version Debian
+# À exécuter en ROOT sur une VM srv-wazuh-1 PROPRE (pas le template !)
 # ==============================================================================
 
-set -e  # Arrêt au premier vrai problème
+set -e
 
-BLUE='\033[0;34m'
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+BLUE='\033[0;34m'; GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 # ------------------------------------------------------------------------------
-# GARDE-FOU 1 : Vérifier qu'on n'est PAS sur le template
+# GARDE-FOU : pas sur le template
 # ------------------------------------------------------------------------------
-CURRENT_HOST=$(hostname)
-if [ "$CURRENT_HOST" = "srv-debian-template" ]; then
-    echo -e "${RED}========================================================${NC}"
-    echo -e "${RED} STOP ! Tu es sur le TEMPLATE (srv-debian-template).${NC}"
-    echo -e "${RED} N'installe JAMAIS Wazuh sur le template.${NC}"
-    echo -e "${RED}${NC}"
-    echo -e "${RED} 1. Va dans Proxmox${NC}"
-    echo -e "${RED} 2. Clone le template 101 -> VM 201 'srv-wazuh-1'${NC}"
-    echo -e "${RED} 3. Démarre la VM 201 et lance ce script LÀ${NC}"
-    echo -e "${RED}========================================================${NC}"
+if [ "$(hostname)" = "srv-debian-template" ]; then
+    echo -e "${RED}STOP : tu es sur le template. Clone-le d'abord en VM 201.${NC}"
     exit 1
 fi
 
-echo -e "${BLUE}==== [1/7] Vérification de la version Python ====${NC}"
-PYVER=$(python3 --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
-echo -e "Python détecté : ${YELLOW}$PYVER${NC}"
+echo -e "${BLUE}==== [1/6] Vérifications préalables ====${NC}"
 
-# ------------------------------------------------------------------------------
-# CORRECTION DU PROBLÈME PYTHON 3.13
-# Wazuh ne supporte pas Python 3.13. Si présent, on installe Python 3.11
-# depuis les dépôts et on le définit comme python3 par défaut.
-# ------------------------------------------------------------------------------
-echo -e "${BLUE}==== [2/7] Configuration des dépôts Debian ====${NC}"
-cat << 'EOF' > /etc/apt/sources.list
-deb http://deb.debian.org/debian/ bookworm main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian/ bookworm-updates main contrib non-free non-free-firmware
-EOF
+# Vérifier qu'on est root
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Lance ce script en root (su -)${NC}"
+    exit 1
+fi
+
+# Vérifier la RAM disponible
+RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
+echo -e "RAM détectée : ${YELLOW}${RAM_MB} Mo${NC}"
+if [ "$RAM_MB" -lt 3800 ]; then
+    echo -e "${RED}⚠️  RAM insuffisante (${RAM_MB} Mo). Wazuh Docker veut 4 Go minimum.${NC}"
+    echo -e "${RED}   Éteins la VM, augmente la RAM dans Proxmox, et relance.${NC}"
+    exit 1
+fi
+
+# Réparer apt si "ip" est cassé (cas des VM abîmées)
+if ! command -v ip >/dev/null 2>&1; then
+    echo -e "${YELLOW}La commande 'ip' manque, réparation de iproute2...${NC}"
+    apt-get update --fix-missing || true
+    apt-get install -y --reinstall iproute2 || true
+fi
+
+echo -e "${BLUE}==== [2/6] Nettoyage et mise à jour des dépôts ====${NC}"
+# Repérer la version Debian pour utiliser le bon dépôt Docker
+. /etc/os-release
+echo -e "Distribution : ${YELLOW}${PRETTY_NAME}${NC}"
 
 apt-get update --fix-missing
+apt-get install -y ca-certificates curl gnupg lsb-release
 
-echo -e "${BLUE}==== [3/7] Résolution du conflit Python (si Python 3.13) ====${NC}"
-if [ "$PYVER" = "3.13" ]; then
-    echo -e "${YELLOW}Python 3.13 détecté — incompatible avec Wazuh.${NC}"
-    echo -e "${YELLOW}Installation de Python 3.11 (version supportée)...${NC}"
+echo -e "${BLUE}==== [3/6] Installation de Docker ====${NC}"
+# Méthode officielle Docker
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
 
-    # Installer Python 3.11 depuis bookworm (version par défaut de Debian 12)
-    apt-get install -y python3.11 python3.11-minimal libpython3.11-stdlib || true
-
-    # Pointer python3 vers 3.11 si dispo
-    if [ -f /usr/bin/python3.11 ]; then
-        update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 || true
-        update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 2 || true
-        # Forcer 3.11 par défaut
-        update-alternatives --set python3 /usr/bin/python3.11 || true
-        echo -e "${GREEN}python3 pointe maintenant vers Python 3.11${NC}"
-    else
-        echo -e "${YELLOW}Python 3.11 non dispo dans les dépôts, on tente quand même.${NC}"
-    fi
+# Déterminer le nom de code Debian (bookworm pour 12, trixie pour 13)
+DEBIAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+# Docker n'a pas toujours de repo pour trixie ; on retombe sur bookworm si besoin
+if [ "$DEBIAN_CODENAME" = "trixie" ]; then
+    echo -e "${YELLOW}Debian 13 (trixie) : utilisation du dépôt Docker bookworm (compatible).${NC}"
+    DEBIAN_CODENAME="bookworm"
 fi
 
-echo -e "${BLUE}==== [4/7] Installation des dépendances de base ====${NC}"
-# Installer les paquets nécessaires SANS forcer la suppression d'essentiels
-apt-get install -y --no-install-recommends \
-    gnupg apt-transport-https curl git ca-certificates lsb-release \
-    || { echo -e "${RED}Échec install dépendances de base${NC}"; exit 1; }
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $DEBIAN_CODENAME stable" > /etc/apt/sources.list.d/docker.list
 
-echo -e "${BLUE}==== [5/7] Lancement de l'installation Wazuh ====${NC}"
-echo -e "${YELLOW}⚠️  Cela prend 15-20 minutes. Patiente sans interrompre.${NC}"
-cd /root
-curl -sO https://packages.wazuh.com/4.9/wazuh-install.sh
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# Lancer avec --ignore-check pour passer la vérification de distrib
-# (Debian récent n'est pas dans la liste officielle mais ça marche)
-bash ./wazuh-install.sh -a -i
+# Démarrer Docker
+systemctl enable --now docker
 
-# Vérifier que l'install a réussi avant de continuer
-if [ ! -d /var/ossec ]; then
-    echo -e "${RED}========================================================${NC}"
-    echo -e "${RED} L'installation Wazuh a échoué (/var/ossec absent).${NC}"
-    echo -e "${RED} Consulte le log : /var/log/wazuh-install.log${NC}"
-    echo -e "${RED} La suite du script est annulée.${NC}"
-    echo -e "${RED}========================================================${NC}"
+# Vérifier Docker
+if ! docker --version >/dev/null 2>&1; then
+    echo -e "${RED}Échec de l'installation de Docker.${NC}"
     exit 1
 fi
+echo -e "${GREEN}Docker installé : $(docker --version)${NC}"
 
-echo -e "${GREEN}Wazuh installé avec succès !${NC}"
+echo -e "${BLUE}==== [4/6] Configuration système pour Wazuh ====${NC}"
+# Wazuh/OpenSearch a besoin d'une valeur élevée de max_map_count
+sysctl -w vm.max_map_count=262144
+# Rendre permanent
+if ! grep -q "vm.max_map_count" /etc/sysctl.conf; then
+    echo "vm.max_map_count=262144" >> /etc/sysctl.conf
+fi
 
-echo -e "${BLUE}==== [6/7] Intégration vers le Portail NexaMind ====${NC}"
-cat << 'PYEOF' > /var/ossec/integrations/custom-nexamind.py
-#!/usr/bin/env python3
-import sys
-import json
+echo -e "${BLUE}==== [5/6] Récupération de Wazuh Docker ====${NC}"
+cd /root
+# Cloner le dépôt officiel wazuh-docker
+if [ ! -d wazuh-docker ]; then
+    git clone https://github.com/wazuh/wazuh-docker.git -b v4.9.2
+fi
+cd wazuh-docker/single-node
 
-try:
-    import requests
-except ImportError:
-    sys.exit(0)  # requests pas dispo, on abandonne proprement
+echo -e "${YELLOW}Génération des certificats SSL...${NC}"
+docker compose -f generate-indexer-certs.yml run --rm generator
 
-alert_file = sys.argv[1]
-with open(alert_file) as f:
-    alert = json.load(f)
+echo -e "${BLUE}==== [6/6] Démarrage de Wazuh ====${NC}"
+echo -e "${YELLOW}⚠️  Premier démarrage : 5-10 min (téléchargement des images).${NC}"
+docker compose up -d
 
-level = alert.get("rule", {}).get("level", 0)
-niveau = "critique" if level >= 10 else "moyen" if level >= 7 else "faible"
-payload = {
-    "niveau": niveau,
-    "source": alert.get("data", {}).get("srcip", "inconnu"),
-    "description": alert.get("rule", {}).get("description", "Alerte détectée par le SOC"),
-}
-
-try:
-    # IP du portail srv-web-1 — À ADAPTER à ton IP réelle
-    requests.post("http://192.168.20.20:8000/api/alerte", json=payload, timeout=5)
-except Exception:
-    pass
-PYEOF
-
-chmod 750 /var/ossec/integrations/custom-nexamind.py
-chown root:wazuh /var/ossec/integrations/custom-nexamind.py
-
-# Installer requests pour le python de Wazuh
-/var/ossec/framework/python/bin/pip3 install requests 2>/dev/null || pip3 install requests 2>/dev/null || true
-
-echo -e "${BLUE}==== [7/7] Activation de l'intégration dans ossec.conf ====${NC}"
-# Insérer le bloc <integration> juste avant </ossec_config>
-# Méthode sûre avec un fichier temporaire
-python3 - << 'PYEOF'
-config = "/var/ossec/etc/ossec.conf"
-with open(config) as f:
-    content = f.read()
-
-integration = """
-  <integration>
-    <name>custom-nexamind.py</name>
-    <level>7</level>
-    <alert_format>json</alert_format>
-  </integration>
-"""
-
-# Insérer avant la dernière balise fermante
-if "custom-nexamind.py" not in content:
-    content = content.replace("</ossec_config>", integration + "</ossec_config>")
-    with open(config, "w") as f:
-        f.write(content)
-    print("Intégration ajoutée à ossec.conf")
-else:
-    print("Intégration déjà présente")
-PYEOF
-
-systemctl restart wazuh-manager
+# Attendre un peu que les conteneurs montent
+sleep 30
 
 echo -e "${GREEN}========================================================================${NC}"
-echo -e "${GREEN}✅ Installation terminée !${NC}"
-echo -e "${GREEN}   Connecte-toi sur : https://$(hostname -I | awk '{print $1}')${NC}"
-echo -e "${GREEN}   Note le MOT DE PASSE admin affiché plus haut (User: admin)${NC}"
-echo -e "${GREEN}   Mets-le dans Passbolt !${NC}"
+echo -e "${GREEN}✅ Wazuh Docker démarré !${NC}"
 echo -e "${GREEN}========================================================================${NC}"
+echo -e "${GREEN}Dashboard : https://$(hostname -I | awk '{print $1}')${NC}"
+echo -e "${GREEN}   Identifiants par défaut :${NC}"
+echo -e "${GREEN}   User     : admin${NC}"
+echo -e "${GREEN}   Password : SecretPassword${NC}"
+echo -e "${YELLOW}   ⚠️  CHANGE ce mot de passe par défaut ! (voir doc Wazuh)${NC}"
+echo -e "${GREEN}========================================================================${NC}"
+echo
+echo -e "${BLUE}Commandes utiles :${NC}"
+echo -e "  Voir les conteneurs : ${YELLOW}docker ps${NC}"
+echo -e "  Voir les logs       : ${YELLOW}docker compose logs -f${NC}  (dans /root/wazuh-docker/single-node)"
+echo -e "  Arrêter Wazuh       : ${YELLOW}docker compose down${NC}"
+echo -e "  Redémarrer Wazuh    : ${YELLOW}docker compose up -d${NC}"
+echo
+echo -e "${YELLOW}Note : si le dashboard ne répond pas tout de suite, attends 2-3 min${NC}"
+echo -e "${YELLOW}que tous les conteneurs finissent de démarrer. Vérifie avec 'docker ps'.${NC}"
