@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% set active = "dashboard" %}
+{% block title %}Tableau de bord — NexaMind{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1 class="page-title">Tableau de bord</h1>
+    <p class="page-subtitle">Vue d'ensemble de votre posture de sécurité · {{ user.company }}</p>
+</div>
+
+<div class="grid grid-3" style="margin-bottom: 24px;">
+    <div class="card stat-card accent">
+        <div class="stat-label">Audits actifs</div>
+        <div class="stat-value">{{ nb_audits }}</div>
+    </div>
+    <div class="card stat-card">
+        <div class="stat-label">Devis en attente</div>
+        <div class="stat-value">{{ nb_devis }}</div>
+    </div>
+    <div class="card stat-card danger">
+        <div class="stat-label">Alertes critiques</div>
+        <div class="stat-value">{{ nb_alertes }}</div>
+    </div>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <div class="card-title">
+            Audits récents
+            <a href="/audits" style="color: var(--accent); font-size: 0.8rem; text-decoration: none;">Tout voir →</a>
+        </div>
+        <table class="data-table">
+            <thead>
+                <tr><th>Prestation</th><th>Statut</th><th>Avancement</th></tr>
+            </thead>
+            <tbody>
+                {% for a in audits %}
+                <tr>
+                    <td>{{ a.titre }}</td>
+                    <td>
+                        {% if a.statut == 'Terminé' %}<span class="badge badge-ok">{{ a.statut }}</span>
+                        {% elif a.statut == 'En cours' %}<span class="badge badge-info">{{ a.statut }}</span>
+                        {% else %}<span class="badge badge-muted">{{ a.statut }}</span>{% endif %}
+                    </td>
+                    <td>
+                        <div class="progress"><div class="progress-fill" style="width: {{ a.progression }}%"></div></div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <div class="card-title">
+            Dernières alertes
+            <a href="/alertes" style="color: var(--accent); font-size: 0.8rem; text-decoration: none;">Tout voir →</a>
+        </div>
+        <table class="data-table">
+            <thead>
+                <tr><th>Niveau</th><th>Source</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+                {% for al in alertes %}
+                <tr>
+                    <td>
+                        {% if al.niveau == 'critique' %}<span class="badge badge-danger">{{ al.niveau }}</span>
+                        {% elif al.niveau == 'moyen' %}<span class="badge badge-warning">{{ al.niveau }}</span>
+                        {% else %}<span class="badge badge-info">{{ al.niveau }}</span>{% endif %}
+                    </td>
+                    <td class="mono" style="font-size: 0.8rem;">{{ al.source }}</td>
+                    <td style="font-size: 0.85rem; color: var(--text-muted);">{{ al.description[:50] }}...</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
