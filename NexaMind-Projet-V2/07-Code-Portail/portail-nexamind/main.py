@@ -36,7 +36,7 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
-DB_PATH = "nexamind.db"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nexamind.db")
 
 # ============================================================
 # Base de données SQLite
