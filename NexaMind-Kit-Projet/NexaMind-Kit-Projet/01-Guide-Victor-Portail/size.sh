@@ -43,15 +43,19 @@ if [ "$DISK_GB" -lt 50 ]; then
     exit 1
 fi
 
-# Vérifier si sda3 existe déjà (script déjà lancé ?)
+# Vérifier si sda3 existe déjà (script déjà lancé / reprise après reboot ?)
 if lsblk /dev/sda | grep -q "sda3"; then
     echo -e "${YELLOW}La partition sda3 existe déjà.${NC}"
-    echo -e "${YELLOW}Le script a peut-être déjà été lancé. Vérification...${NC}"
     if mount | grep -q "/var/lib/docker"; then
         echo -e "${GREEN}/var/lib/docker est déjà monté sur une partition dédiée.${NC}"
-        echo -e "${GREEN}Rien à faire. Relance Wazuh avec :${NC}"
+        echo -e "${GREEN}Tout est en ordre. Relance Wazuh avec :${NC}"
         echo -e "${GREEN}  cd ~/wazuh-docker/single-node && docker compose up -d${NC}"
         exit 0
+    else
+        echo -e "${YELLOW}sda3 existe mais n'est pas montée sur /var/lib/docker.${NC}"
+        echo -e "${YELLOW}Reprise du script : on va la formater et la monter.${NC}"
+        echo
+        SKIP_PARTITION=1
     fi
 fi
 
@@ -89,22 +93,51 @@ echo -e "${GREEN}Docker arrêté.${NC}"
 # ------------------------------------------------------------------------------
 # Étape 2 : Créer la nouvelle partition dans l'espace libre
 # ------------------------------------------------------------------------------
+if [ "${SKIP_PARTITION:-0}" = "1" ]; then
+    echo -e "${BLUE}==== [2/7] Partition sda3 déjà existante, on passe ====${NC}"
+else
 echo -e "${BLUE}==== [2/7] Création de la partition sda3 ====${NC}"
 # On utilise sfdisk pour ajouter une partition utilisant tout l'espace libre
-echo -e ';' | sfdisk --append /dev/sda
+# --force et --no-reread : nécessaires car sda1 (système) est monté.
+# On ne touche QUE l'espace libre, donc c'est sans danger pour les partitions existantes.
+echo -e ';' | sfdisk --force --no-reread --append /dev/sda
 
-# Recharger la table de partitions
-partprobe /dev/sda 2>/dev/null || true
+# Recharger la table de partitions (le noyau doit voir la nouvelle partition)
+partprobe /dev/sda 2>/dev/null || partx -u /dev/sda 2>/dev/null || true
 sleep 2
+
+# Si le noyau ne voit toujours pas sda3, forcer la relecture
+if ! lsblk /dev/sda | grep -q "sda3"; then
+    partx -a /dev/sda 2>/dev/null || true
+    sleep 2
+fi
 
 # Vérifier que sda3 a bien été créée
 if ! lsblk /dev/sda | grep -q "sda3"; then
-    echo -e "${RED}Échec de création de sda3. Vérifie avec 'lsblk' et 'fdisk -l /dev/sda'.${NC}"
-    echo -e "${RED}Redémarre Docker manuellement : systemctl start docker${NC}"
-    exit 1
+    echo -e "${YELLOW}========================================================${NC}"
+    echo -e "${YELLOW} La partition a été créée dans la table, mais le noyau${NC}"
+    echo -e "${YELLOW} ne la voit pas encore (disque système monté).${NC}"
+    echo -e "${YELLOW}${NC}"
+    echo -e "${YELLOW} Il faut REDÉMARRER la VM puis relancer ce script.${NC}"
+    echo -e "${YELLOW} Le script reprendra où il en est (il détecte sda3).${NC}"
+    echo -e "${YELLOW}========================================================${NC}"
+    echo
+    echo -e "${BLUE}Redémarrage de Docker avant reboot...${NC}"
+    systemctl start docker 2>/dev/null || true
+    echo
+    read -p "Redémarrer la VM maintenant ? (oui/non) : " DOREBOOT
+    if [ "$DOREBOOT" = "oui" ]; then
+        echo -e "${GREEN}Reboot... reconnecte-toi et relance ./agrandir-docker.sh${NC}"
+        sleep 2
+        reboot
+    else
+        echo -e "${YELLOW}Redémarre manuellement (reboot) puis relance le script.${NC}"
+    fi
+    exit 0
 fi
-echo -e "${GREEN}Partition sda3 créée.${NC}"
+echo -e "${GREEN}Partition sda3 créée et visible.${NC}"
 lsblk /dev/sda
+fi  # fin du bloc SKIP_PARTITION
 
 # ------------------------------------------------------------------------------
 # Étape 3 : Formater la nouvelle partition
