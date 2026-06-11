@@ -15,6 +15,7 @@ import bcrypt
 import sqlite3
 import json
 import os
+import anthropic  # Ajout de la bibliothèque pour Claude
 from datetime import datetime
 from pathlib import Path
 
@@ -279,39 +280,51 @@ async def recevoir_alerte(request: Request):
 
 
 # ============================================================
-# API : génération de devis avec Claude (à compléter avec ta clé)
+# API : génération de devis avec Claude intégrée
 # ============================================================
 @app.post("/api/generer-devis")
 async def generer_devis(request: Request):
     """
-    Génère un devis automatique via l'API Claude.
-    Pour activer : décommente le bloc et ajoute ta clé API Anthropic.
+    Génère un devis automatique via l'API Claude d'Anthropic.
     """
     data = await request.json()
     besoin = data.get("besoin", "")
 
-    # ---- VERSION SANS API (mock pour démarrer) ----
-    devis_mock = {
-        "description": f"Prestation sur mesure : {besoin}",
-        "montant_estime": 8500,
-        "details": "Audit + remédiation + rapport (estimation automatique)",
-    }
-    return JSONResponse(devis_mock)
+    try:
+        # Initialisation du client Anthropic avec ta clé API passée
+        client = anthropic.Anthropic(api_key="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")
+        
+        # Appel à l'API Claude (Utilisation de claude-3-5-sonnet-20241022 pour de meilleures performances JSON)
+        message = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=800,
+            temperature=0.3,  # Basse température pour forcer le respect du format JSON strict
+            messages=[{
+                "role": "user",
+                "content": f"""Tu es commercial chez NexaMind, entreprise de cybersécurité.
+Un client exprime ce besoin : "{besoin}"
+Génère un devis structuré en JSON avec exactement ces clés :
+- "description": Le titre de la prestation globale (string)
+- "montant_estime": Un prix cohérent chiffré en euros uniquement en nombre entier (integer)
+- "details": Les détails textuels des prestations techniques incluses (string)
 
-    # ---- VERSION AVEC API CLAUDE (à activer) ----
-    # import anthropic
-    # client = anthropic.Anthropic(api_key="TA_CLE_API")
-    # message = client.messages.create(
-    #     model="claude-sonnet-4-20250514",
-    #     max_tokens=600,
-    #     messages=[{
-    #         "role": "user",
-    #         "content": f"""Tu es commercial chez NexaMind, entreprise de cybersécurité.
-    # Un client exprime ce besoin : "{besoin}"
-    # Génère un devis structuré en JSON avec : description, montant_estime (en euros),
-    # et details (les prestations incluses). Réponds UNIQUEMENT en JSON valide."""
-    #     }]
-    # )
-    # import json as _json
-    # texte = message.content[0].text
-    # return JSONResponse(_json.loads(texte))
+Réponds UNIQUEMENT avec le bloc JSON valide, sans phrases d'introduction ni de conclusion."""
+            }]
+        )
+        
+        # Extraction et décodage du texte JSON reçu
+        texte_ia = message.content[0].text.strip()
+        devis_json = json.loads(texte_ia)
+        
+        return JSONResponse(devis_json)
+
+    except Exception as e:
+        # En cas de problème ou d'indisponibilité de la clé, renvoie une erreur propre
+        return JSONResponse(
+            {
+                "description": "Erreur lors de la génération automatique",
+                "montant_estime": 0,
+                "details": f"Impossible de contacter Claude. Détails de l'erreur : {str(e)}"
+            },
+            status_code=500
+        )
